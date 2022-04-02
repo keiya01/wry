@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+use tao::platform::macos::WindowBuilderExtMacOS;
+
 fn main() -> wry::Result<()> {
   use wry::{
     application::{
@@ -15,6 +17,7 @@ fn main() -> wry::Result<()> {
   let event_loop = EventLoop::new();
   let window = WindowBuilder::new()
     .with_title("Hello World")
+    .with_fullsize_content_view(true)
     .build(&event_loop)?;
   let webview = WebViewBuilder::new(window)?.with_url("https://html5test.com")?;
 
