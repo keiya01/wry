@@ -11,7 +11,7 @@ use crate::{
 
 use file_drop::FileDropController;
 
-use std::{collections::HashSet, rc::Rc, sync::mpsc};
+use std::{collections::HashSet, rc::Rc, slice, sync::mpsc};
 
 use once_cell::unsync::OnceCell;
 
@@ -19,10 +19,12 @@ use windows::{
   core::Interface,
   Win32::{
     Foundation::{BOOL, E_FAIL, E_POINTER, FARPROC, HWND, POINT, PWSTR, RECT},
+    Globalization,
     System::{
       Com::{IStream, StructuredStorage::CreateStreamOnHGlobal},
       LibraryLoader::{GetProcAddress, LoadLibraryA},
       SystemInformation::OSVERSIONINFOW,
+      SystemServices::LOCALE_NAME_MAX_LENGTH,
       WinRT::EventRegistrationToken,
     },
     UI::WindowsAndMessaging::{
@@ -42,6 +44,16 @@ impl From<webview2_com::Error> for Error {
   fn from(err: webview2_com::Error) -> Self {
     Error::WebView2Error(err)
   }
+}
+
+fn wchar_to_string(wchar: &[u16]) -> String {
+  String::from_utf16_lossy(wchar)
+}
+
+fn wchar_ptr_to_string(wchar: PWSTR) -> String {
+  let len = unsafe { Globalization::lstrlenW(wchar) } as usize;
+  let wchar_slice = unsafe { slice::from_raw_parts(wchar.0, len) };
+  wchar_to_string(wchar_slice)
 }
 
 pub struct InnerWebView {
@@ -86,6 +98,34 @@ impl InnerWebView {
   ) -> webview2_com::Result<ICoreWebView2Environment> {
     let (tx, rx) = mpsc::channel();
 
+    let options = unsafe {
+      let options: ICoreWebView2EnvironmentOptions =
+        CoreWebView2EnvironmentOptions::default().into();
+
+      // Setting user's system language
+      let lcid = Globalization::GetUserDefaultUILanguage();
+      let mut lang = PWSTR::default();
+      let nchars = Globalization::LCIDToLocaleName(
+        lcid as u32,
+        lang,
+        0,
+        Globalization::LOCALE_ALLOW_NEUTRAL_NAMES,
+      );
+      let lang = PWSTR(Vec::with_capacity(nchars as usize).as_mut_ptr());
+      Globalization::LCIDToLocaleName(
+        lcid as u32,
+        lang,
+        nchars,
+        Globalization::LOCALE_ALLOW_NEUTRAL_NAMES,
+      );
+      let lang = wchar_ptr_to_string(lang);
+      options
+        .SetLanguage(lang)
+        .map_err(webview2_com::Error::WindowsError)?;
+
+      options
+    };
+
     let data_directory = web_context
       .as_deref()
       .and_then(|context| context.data_directory())
@@ -95,10 +135,6 @@ impl InnerWebView {
     CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
       Box::new(move |environmentcreatedhandler| unsafe {
         if let Some(data_directory) = data_directory {
-          // If we have a custom data_directory, we need to use a call to `CreateCoreWebView2EnvironmentWithOptions`
-          // instead of the much simpler `CreateCoreWebView2Environment`.
-          let options: ICoreWebView2EnvironmentOptions =
-            CoreWebView2EnvironmentOptions::default().into();
           let data_directory = pwstr_from_str(&data_directory);
           let result = CreateCoreWebView2EnvironmentWithOptions(
             PWSTR::default(),
@@ -112,8 +148,13 @@ impl InnerWebView {
           return result;
         }
 
-        CreateCoreWebView2Environment(environmentcreatedhandler)
-          .map_err(webview2_com::Error::WindowsError)
+        CreateCoreWebView2EnvironmentWithOptions(
+          PWSTR::default(),
+          PWSTR::default(),
+          options,
+          environmentcreatedhandler,
+        )
+        .map_err(webview2_com::Error::WindowsError)
       }),
       Box::new(move |error_code, environment| {
         error_code?;
